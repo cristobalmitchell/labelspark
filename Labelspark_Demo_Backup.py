@@ -1,6 +1,6 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC ##Import SDK and Establish Connection from Databricks##
+# MAGIC ##Notebook Setup##
 
 # COMMAND ----------
 
@@ -23,10 +23,6 @@ try: API_KEY
 except NameError: 
   API_KEY = dbutils.notebook.run("api_key", 60)
 
-
-# COMMAND ----------
-
-# DBTITLE 1,Get Labelbox Client
 from labelbox import Client
 client = Client(API_KEY)
 
@@ -71,7 +67,6 @@ for table in tblList:
       table_exists = True
 
 if table_exists == False: create_unstructured_dataset()
-      
 
 # COMMAND ----------
 
