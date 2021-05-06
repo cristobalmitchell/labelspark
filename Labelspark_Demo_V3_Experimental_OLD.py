@@ -83,7 +83,7 @@ if table_exists == False: create_unstructured_dataset()
 
 # COMMAND ----------
 
-# DBTITLE 1,Create Dataset with Labelbox for Annotation (Chris Amata ToDo)
+# DBTITLE 1,Create Dataset with Labelbox for Annotation
 # Pass image URLs to Labelbox for annotation 
 
 unstructured_data = spark.table("unstructured_data")
@@ -93,21 +93,21 @@ dataSet_new = client.create_dataset(name = "Sample DataSet LabelSpark")
 dataRow_json = []
 
 #ported Pandas code to koalas
-for index, row in unstructured_data.iterrows():
-  data_row_urls = [
+data_row_urls = [
     {
       "external_id" : row['external_id'],
       "row_data": row['row_data'] 
-    }
-  ]
-  #note that we can easily send a batch of rows to Labelbox. Using a simple row-by-row creation for this demo. 
-  dataSet_new.create_data_rows(data_row_urls)
+    } for index, row in 
+    unstructured_data.iterrows()
+]
+upload_task = dataSet_new.create_data_rows(data_row_urls)
+upload_task.wait_till_done()
 
 
 # COMMAND ----------
 
-# DBTITLE 1,Programmatically Set Up Ontology from Databricks
-project = client.create_project(name = "Labelspark")
+# DBTITLE 1,Programmatically Set Up Ontology from Databricks 
+project_demo1 = client.create_project(name = "Labelspark")
 ontology = """
 {
     "tools": [
@@ -164,7 +164,7 @@ ontology = """
 }
 """
 # Connect Project 
-project.datasets.connect(dataSet_new)
+project_demo1.datasets.connect(dataSet_new)
 
 # Setup frontends 
 all_frontends = list(client.get_labeling_frontends())
@@ -174,10 +174,54 @@ for frontend in all_frontends:
         break
 
 # Attach Frontends
-project.labeling_frontend.connect(project_frontend)
+project_demo1.labeling_frontend.connect(project_frontend)
 
 # Attach Project 
-project.setup(project_frontend, ontology)
+project_demo1.setup(project_frontend, ontology)
+
+print("Project Setup is complete.")
+
+# COMMAND ----------
+
+# DBTITLE 1,You Can Also Use the Ontology Builder
+from labelbox.schema.ontology import OntologyBuilder, Tool, Classification, Option
+from labelbox import Client
+from getpass import getpass
+import os
+
+#demonstration of the OntologyBuilder helper 
+ontology = OntologyBuilder(
+    tools=[
+        Tool(tool=Tool.Type.BBOX, name="Sample Box"),
+        Tool(tool=Tool.Type.SEGMENTATION,
+             name="Sample Segmentation",
+             classifications=[
+                 Classification(class_type=Classification.Type.TEXT,
+                                instructions="name")
+             ])
+    ],
+    classifications=[
+        Classification(class_type=Classification.Type.RADIO,
+                       instructions="Sample Radio Button",
+                       options=[Option(value="Option A"),
+                                Option(value="Option B")])
+    ])
+
+#inspect your ontology JSON with print(ontology.asdict())
+
+project_demo2 = client.create_project(name="LabelSpark", description = "Your project description goes here")
+# Setup frontends 
+all_frontends = list(client.get_labeling_frontends())
+for frontend in all_frontends:
+    if frontend.name == 'Editor':
+        project_frontend = frontend
+        break
+
+# Attach Frontends
+project_demo2.labeling_frontend.connect(project_frontend)
+
+# Attach Project 
+project_demo2.setup(project_frontend, ontology.asdict())
 
 print("Project Setup is complete.")
 
@@ -209,7 +253,7 @@ def parse_export(export_file):
     
 if __name__ == '__main__':
     client = Client(API_KEY) #refresh client 
-    project = client.get_project("ckmvgzksjdp2b0789rqam8pnt")
+    project = client.get_project("ckmvgzksjdp2b0789rqam8pnt") #replace with your project ID 
     with urllib.request.urlopen(project.export_labels()) as url:
         export_file = json.loads(url.read().decode())
     parse_export(export_file)
@@ -252,16 +296,17 @@ if __name__ == '__main__':
       my_dictionary = {}
       
       for classification in row.classifications: 
-        answer = classification.answer.title #labelbox schema is funny 
+        answer = classification.answer.title 
         title = classification.title
         my_dictionary[title] = answer
         my_dictionary["DataRowID"] = row.DataRowID
       new_json.append(my_dictionary)
     
     parsed_classifications = pd.DataFrame(new_json).to_spark() #this is all leveraging Spark + Koalas! 
-    bronze_table_simpler = bronze_table.withColumnRenamed("DataRow ID", "DataRowID").select("DataRowID", "Dataset Name", "External ID", "Label")
+    bronze_table_simpler = bronze_table.withColumnRenamed("DataRow ID", "DataRowID").select("DataRowID", "Dataset Name", "External ID", "Labeled Data")
     
     silver_table = bronze_table_simpler.join(parsed_classifications, ["DataRowID"] ,"inner")
+    silver_table.registerTempTable("movie_stills_demo_silver")
     display(silver_table)
       
 
@@ -269,11 +314,11 @@ if __name__ == '__main__':
 
 # MAGIC %sql
 # MAGIC 
-# MAGIC select * from movie_stills_demodisp
+# MAGIC select * from movie_stills_demo_silver
 
 # COMMAND ----------
 
-# DBTITLE 1,Refine to Silver Table
+# DBTITLE 1,Refine to Silver Table (deprecated) 
 def parse_export(export_file):
     new_json = []
     images = []
@@ -447,7 +492,7 @@ if __name__ == '__main__':
 
 # MAGIC %sql 
 # MAGIC 
-# MAGIC SELECT * FROM movie_stills_demo WHERE `Are there people in this still?` = "No"
+# MAGIC SELECT * FROM movie_stills_demo_silver WHERE `Are there people in this still?` = "No"
 
 # COMMAND ----------
 
@@ -457,6 +502,14 @@ if __name__ == '__main__':
 # MAGIC and `Wide Receiver` IS NOT NULL
 # MAGIC and `Tight End` IS NOT NULL
 # MAGIC and `Running Back` IS NOT NULL
+
+# COMMAND ----------
+
+# DBTITLE 1,Demo Cleanup Code: Deleting Dataset and Projects
+client = Client(API_KEY)
+dataSet_new.delete()
+project_demo1.delete()
+project_demo2.delete()
 
 # COMMAND ----------
 

@@ -14,6 +14,7 @@ import databricks.koalas as pd
 import pandas as pd2
 import os
 from PIL import Image
+from labelbox import Client
 
 # !pip install Labelbox ##uncomment if not installed 
 # !pip install pillow 
@@ -23,12 +24,12 @@ try: API_KEY
 except NameError: 
   API_KEY = dbutils.notebook.run("api_key", 60)
 
-from labelbox import Client
-client = Client(API_KEY)
 
 # COMMAND ----------
 
 # DBTITLE 1,Check Successful API Connection w/ Labelbox SDK 
+client = Client(API_KEY)
+
 projects = client.get_projects()
 for project in projects:
     print(project.name, project.uid)
@@ -57,10 +58,12 @@ def create_unstructured_dataset():
   df_images.registerTempTable("unstructured_data")
   # df_images = spark.createDataFrame(images) 
 
-tblList = spark.catalog.listTables()
-if len(tblList) == 0: create_unstructured_dataset()
-  
 table_exists = False 
+tblList = spark.catalog.listTables()
+if len(tblList) == 0: 
+  create_unstructured_dataset()
+  table_exists = True
+
 for table in tblList: 
     if table.name == "unstructured_data": 
       print("Unstructured data table exists")
@@ -71,7 +74,7 @@ if table_exists == False: create_unstructured_dataset()
 # COMMAND ----------
 
 # MAGIC %md 
-# MAGIC ##Load Unstructured Data in Databricks##
+# MAGIC ##Load Unstructured Data##
 
 # COMMAND ----------
 
@@ -91,78 +94,48 @@ dataSet_new = client.create_dataset(name = "Sample DataSet LabelSpark")
 dataRow_json = []
 
 #ported Pandas code to koalas
-for index, row in unstructured_data.iterrows():
-  data_row_urls = [
+data_row_urls = [
     {
       "external_id" : row['external_id'],
       "row_data": row['row_data'] 
-    }
-  ]
-  #note that we can easily send a batch of rows to Labelbox. Using a simple row-by-row creation for this demo. 
-  dataSet_new.create_data_rows(data_row_urls)
+    } for index, row in 
+    unstructured_data.iterrows()
+]
+upload_task = dataSet_new.create_data_rows(data_row_urls)
+upload_task.wait_till_done()
 
 
 # COMMAND ----------
 
-# DBTITLE 1,Programmatically Set Up Ontology from Databricks
-project = client.create_project(name = "Labelspark")
-ontology = """
-{
-    "tools": [
-        {
-            "required": false,
-            "name": "Segmentation",
-            "tool": "superpixel",
-            "color": "#1CE6FF",
-            "classifications": []
-        },
-        {
-            "required": false,
-            "name": "BBox",
-            "tool": "rectangle",
-            "color": "#FF34FF",
-            "classifications": [
-                {
-                    "required": false,
-                    "instructions": "Nested Question",
-                    "name": "nested_question",
-                    "type": "radio",
-                    "options": [
-                        {
-                            "label": "Option 1",
-                            "value": "option_1"
-                        },
-                        {
-                            "label": "Option 2",
-                            "value": "option_2_"
-                        }
-                    ]
-                }
-            ]
-        }
+# DBTITLE 1,Set Up Your Ontology with OntologyBuilder 
+from labelbox.schema.ontology import OntologyBuilder, Tool, Classification, Option
+from labelbox import Client
+from getpass import getpass
+import os
+
+ontology = OntologyBuilder(
+    tools=[
+        Tool(tool=Tool.Type.BBOX, name="Sample Box"),
+        Tool(tool=Tool.Type.SEGMENTATION,
+             name="Sample Segmentation",
+             classifications=[
+                 Classification(class_type=Classification.Type.TEXT,
+                                instructions="name")
+             ])
     ],
-    "classifications": [
-        {
-            "required": false,
-            "instructions": "Global Classifcation",
-            "name": "global_classifcation",
-            "type": "radio",
-            "options": [
-                {
-                    "label": "Option 1",
-                    "value": "option_1_"
-                },
-                {
-                    "label": "Option 2",
-                    "value": "option_2"
-                }
-            ]
-        }
-    ]
-}
-"""
-# Connect Project 
-project.datasets.connect(dataSet_new)
+    classifications=[
+        Classification(class_type=Classification.Type.RADIO,
+                       instructions="Sample Radio Button",
+                       options=[Option(value="Option A"),
+                                Option(value="Option B")])
+    ])
+
+# print(ontology.asdict())
+
+project_demo2 = client.create_project(name="LabelSpark", description = "Your project description goes here")
+
+# Connect Project to dataset 
+project_demo2.datasets.connect(dataSet_new)
 
 # Setup frontends 
 all_frontends = list(client.get_labeling_frontends())
@@ -172,10 +145,10 @@ for frontend in all_frontends:
         break
 
 # Attach Frontends
-project.labeling_frontend.connect(project_frontend)
+project_demo2.labeling_frontend.connect(project_frontend)
 
 # Attach Project 
-project.setup(project_frontend, ontology)
+project_demo2.setup(project_frontend, ontology.asdict())
 
 print("Project Setup is complete.")
 
@@ -186,81 +159,66 @@ print("Project Setup is complete.")
 
 # COMMAND ----------
 
-def parse_export(export_file):
-    bronze_new_json = []
-    images = []
-    
-    for x in export_file: 
-        # Delete unneeded features 
-        x['Label'] = str(x['Label'])
-        x['Benchmark ID'] = str(x['Benchmark ID'])
-        x['Reviews'] = str(x['Reviews'])
-        
-         # Add values to List
-        bronze_new_json.append(x)
-        
-    export_bronze = pd2.DataFrame(bronze_new_json)
-    df_bronze = spark.createDataFrame(export_bronze)
-    df_bronze.printSchema()
-    df_bronze.registerTempTable("movie_stills_demo")
-    display(df_bronze)
-    
+# DBTITLE 1,Query Labelbox for Bronze Annotation Table
+def jsonToDataFrame(json, schema=None):
+  #code taken from Databricks tutorial https://docs.azuredatabricks.net/_static/notebooks/transform-complex-data-types-python.html
+  reader = spark.read
+  if schema:
+    reader.schema(schema)
+  return reader.json(sc.parallelize([json]))
+
 if __name__ == '__main__':
     client = Client(API_KEY) #refresh client 
-    project = client.get_project("ckmvgzksjdp2b0789rqam8pnt")
+    project = client.get_project("ckoamhn1k5clr08584thrrp37") 
     with urllib.request.urlopen(project.export_labels()) as url:
-        export_file = json.loads(url.read().decode())
-    parse_export(export_file)
+        api_response_string = url.read().decode() #this is a string of JSONs 
+    
+    bronze_table = jsonToDataFrame(api_response_string, schema = None)
+    bronze_table.registerTempTable("movie_stills_demo")
+    
+    display(bronze_table)
+        
 
 # COMMAND ----------
 
-# DBTITLE 1,Refine to Silver Table
-def parse_export(export_file):
-    new_json = []
-    images = []
-    for x in export_file: 
-        if 'classifications' in x['Label']:
-            count = 0
-            for y in x['Label']['classifications']:
-                answer = x['Label']['classifications'][count]['answer']['title']
-                title = y['title']
-                count = count + 1
-                x[title] = answer
-        
-        # Get Image specs's
-        url = x['Labeled Data']
-        image = Image.open(urllib.request.urlopen(url))
-        width, height = image.size
-        # Add to JSON 
-        x['Width'] = width
-        x['Height'] = height 
-        
-        # Delete unneeded features 
-        del x['Label']
-        del x['Agreement']
-        del x['Benchmark Agreement']
-        del x['Benchmark ID']
-        del x['Reviews']
-        del x['Has Open Issues']
-        del x['DataRow ID']
-        del x['ID']
-        # Add values to List
-        new_json.append(x)
-        
-    export = pd2.DataFrame(new_json)
-    df = spark.createDataFrame(export)
-    df.printSchema()
+# DBTITLE 1,Refine to Silver Table 
+def bronze_to_silver(bronze_table): 
+  labels_only = bronze_table.select("DataRow ID","Label").withColumnRenamed("DataRow ID", "DataRowID")
+  labels_and_objects = labels_only.select("DataRowID","Label.*")
+  labels_and_objects = labels_and_objects.to_koalas()
+     
+  new_json = []
+  for index, row in labels_and_objects.iterrows():
+    my_dictionary = {}
     
-    df.registerTempTable("movie_stills_demo")
-    display(df)
+    for classification in row.classifications:
+      answer = classification.answer.title 
+      title = classification.title
+      my_dictionary[title] = answer
+      my_dictionary["DataRowID"] = row.DataRowID
+    new_json.append(my_dictionary)
+    
+  parsed_classifications = pd.DataFrame(new_json).to_spark() #this is all leveraging Spark + Koalas! 
+  bronze_table_simpler = bronze_table.withColumnRenamed("DataRow ID", "DataRowID").select("DataRowID", "Dataset Name", "External ID", "Labeled Data")
+  silver_table = bronze_table_simpler.join(parsed_classifications, ["DataRowID"] ,"inner")
+    
+  return silver_table 
+    
 
 if __name__ == '__main__':
     client = Client(API_KEY) #refresh client 
-    project = client.get_project("ckmvgzksjdp2b0789rqam8pnt")
-    with urllib.request.urlopen(project.export_labels()) as url:
-        export_file = json.loads(url.read().decode())
-    parse_export(export_file)
+    #project = client.get_project("ckmvgzksjdp2b0789rqam8pnt")
+    bronze_table = spark.table("movie_stills_demo")
+    silver_table = bronze_to_silver(bronze_table)
+    silver_table.registerTempTable("movie_stills_demo_silver")
+    display(silver_table)
+      
 
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC 
+# MAGIC select * from movie_stills_demo_silver
 
 # COMMAND ----------
 
@@ -380,7 +338,8 @@ if __name__ == '__main__':
     with urllib.request.urlopen(project.export_labels()) as url:
         export_file = json.loads(url.read().decode())
     parse_export(export_file)
-
+    
+    display()
 
 
 
@@ -388,7 +347,7 @@ if __name__ == '__main__':
 
 # MAGIC %sql 
 # MAGIC 
-# MAGIC SELECT * FROM movie_stills_demo WHERE `Are there people in this still?` = "Yes"
+# MAGIC SELECT * FROM movie_stills_demo_silver WHERE `Are there people in this still?` = "Yes"
 
 # COMMAND ----------
 
@@ -398,6 +357,13 @@ if __name__ == '__main__':
 # MAGIC and `Wide Receiver` IS NOT NULL
 # MAGIC and `Tight End` IS NOT NULL
 # MAGIC and `Running Back` IS NOT NULL
+
+# COMMAND ----------
+
+# DBTITLE 1,Demo Cleanup Code: Deleting Dataset and Projects
+client = Client(API_KEY)
+dataSet_new.delete()
+project_demo2.delete()
 
 # COMMAND ----------
 
